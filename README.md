@@ -7,5 +7,5 @@ A stb-style header only library for interacting with a server via the [pastebeam
 > major functionalities of the protocol are not yet implemented, not to mention
 > the protocol itself is not finalized yet.
 
-> [!NOTNOTEE]
+> [!NOTE]
 > Windows support coming soon.
