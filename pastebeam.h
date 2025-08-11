@@ -159,6 +159,11 @@ typedef struct {
   size_t size;
 } pb_content_t;
 
+typedef struct {
+  char* data;
+  size_t size;
+} pb_slice_t;
+
 pb_err_t pb_connect(const char* host, int port, pb_conn_t* con);
 pb_err_t pb_post_line(pb_conn_t *con, const char* line, char** id);
 
@@ -199,6 +204,10 @@ typedef FILE* file_t;
 
 static void* platform_malloc(size_t size) {
   return malloc(size);
+}
+
+static void platform_free(void* data) {
+  free(data);
 }
 
 static file_t platform_file_open(const char* filename) {
@@ -251,11 +260,13 @@ static pb_err_t platform_send(pb_conn_t* con, const char* data, size_t size) {
   PB_RETURN(con, PB_OK);
 }
 
-static int do_sha256(char* data, size_t len, unsigned char* digest) {
+static int do_sha256(pb_slice_t *data, unsigned char* digest) {
   EVP_MD_CTX *mdctx = NULL;
   const EVP_MD *md = NULL;
   unsigned int md_len = 0;
   int res = -1;
+
+  if (!data || !data->data || !data->size || !digest) return -1;
 
   md = EVP_sha256();
   if (md == NULL) return -1;
@@ -263,9 +274,9 @@ static int do_sha256(char* data, size_t len, unsigned char* digest) {
   mdctx = EVP_MD_CTX_new();
   if (mdctx == NULL) return -1;
 
-  if (!EVP_DigestInit_ex(mdctx, md, NULL))         goto cleanup;
-  if (!EVP_DigestUpdate(mdctx, data, len))         goto cleanup;
-  if (!EVP_DigestFinal_ex(mdctx, digest, &md_len)) goto cleanup;
+  if (!EVP_DigestInit_ex(mdctx, md, NULL))              goto cleanup;
+  if (!EVP_DigestUpdate(mdctx, data->data, data->size)) goto cleanup;
+  if (!EVP_DigestFinal_ex(mdctx, digest, &md_len))      goto cleanup;
   res = 0;
 
 cleanup:
@@ -273,7 +284,7 @@ cleanup:
   return res;
 }
 
-static int gen_rand_prefix(char* prefix, size_t prefix_buf_size, size_t *prefix_len) {
+static int gen_rand_prefix(pb_slice_t *prefix) {
   unsigned int rnd;
   unsigned char bytes[100] = { 0 };
 
@@ -283,9 +294,11 @@ static int gen_rand_prefix(char* prefix, size_t prefix_buf_size, size_t *prefix_
   if(RAND_bytes(bytes, length) != 1) return -1;
 
   int encoded_len = PB_B64_LEN(length);
-  if (encoded_len == 0 || encoded_len > (int)prefix_buf_size) return -1;
+  if (encoded_len == 0) return -1;
 
-  *prefix_len = EVP_EncodeBlock((unsigned char*)prefix, bytes, length);
+  prefix->data = platform_malloc(encoded_len + 1);
+  prefix->size = EVP_EncodeBlock((unsigned char*)prefix->data, bytes, length);
+  if ((int)prefix->size != encoded_len) return -1;
 
   return 0;
 }
@@ -298,31 +311,41 @@ typedef HANDLE file_t;
 
 #endif
 
+pb_slice_t pb_slice_alloc(size_t size) {
+  return (pb_slice_t){
+    .data = platform_malloc(size + 1), // account for '\0'
+    .size = size
+  };
+}
+
+void pb_slice_free(pb_slice_t *s) {
+  platform_free(s->data);
+  s->data = NULL;
+  s->size = 0;
+}
+
 // NOTE: content is already terminated with \r\n
-static pb_err_t solve_challenge(pb_challenge_t* ch, char* content, size_t len, char* b64_prefix, size_t b64_prefix_size, size_t *b64_prefix_len) {
+static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slice_t *b64_prefix) {
   int b64_suffix_len = strlen(ch->b64_suffix);
   unsigned char digest[SHA256_DIGEST_LENGTH] = { 0 };
   char hexdigest[SHA256_DIGEST_LENGTH * 2] = { 0 };
 
-  char* msg = NULL;
-  size_t msg_len;
-
+  pb_slice_t msg = { 0 };
 
   for (size_t iter = 0; iter < PB_CHALLENGE_MAX_ITER; iter++) {
     // printf("%8zu / %d  ", iter, PB_CHALLENGE_MAX_ITER);
-    if(gen_rand_prefix(b64_prefix, b64_prefix_size, b64_prefix_len) != 0) return PB_CHALLENGE_FAILED;
+    if(gen_rand_prefix(b64_prefix) != 0) return PB_CHALLENGE_FAILED;
 
-    msg_len = *b64_prefix_len + 2 + len + b64_suffix_len + 2;
-    msg = platform_malloc(msg_len + 1);
+    msg = pb_slice_alloc(b64_prefix->size + 2 + content->size + b64_suffix_len + 2);
+    if (!msg.data) return PB_CHALLENGE_FAILED;
  
-    if (!msg) return PB_CHALLENGE_FAILED;
-    sprintf(msg, "%.*s\r\n%.*s%s\r\n", (int)*b64_prefix_len, b64_prefix, (int)len, content, ch->b64_suffix);
+    sprintf(msg.data, "%.*s\r\n%.*s%s\r\n", (int)b64_prefix->size, b64_prefix->data, (int)content->size, content->data, ch->b64_suffix);
 
-    if(do_sha256(msg, msg_len, digest) != 0) return PB_CHALLENGE_FAILED;
+    if(do_sha256(&msg, digest) != 0) return PB_CHALLENGE_FAILED;
+    pb_slice_free(&msg);
     for (size_t i=0; i < SHA256_DIGEST_LENGTH; i++) {
       sprintf(&hexdigest[i * 2], "%02X", digest[i]);
     }
-    // printf("digest: %.*s\r", SHA256_DIGEST_LENGTH * 2, hexdigest);
 
     int zeros = 0;
     for (int i = 0; i < SHA256_DIGEST_LENGTH * 2; i++) {
@@ -332,12 +355,13 @@ static pb_err_t solve_challenge(pb_challenge_t* ch, char* content, size_t len, c
         break;
       }
     }
-    free(msg);
 
     if (zeros >= ch->leading_zeros) {
-      // printf("\ndigest: %.*s\n", SHA256_DIGEST_LENGTH * 2, hexdigest);
+      // printf("%.*s", (int)msg.size, msg.data); // remove pb_slice_free(&msg) to run this line
+      // printf("=========================\ndigest: %.*s\n", SHA256_DIGEST_LENGTH * 2, hexdigest);
       return PB_OK;
     }
+    pb_slice_free(b64_prefix);
   }
   return PB_CHALLENGE_FAILED;
 }
@@ -373,27 +397,24 @@ pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
  * @return pb error type, should be handled by the user. PB_OK on success
 */
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
-  char* buffer = NULL;
-  char* content = NULL;
-  size_t content_size = 0;
+  pb_slice_t file_buf = { 0 };
   file_t handle = NULL;
-  size_t file_size = 0;
 
   handle = platform_file_open(filename);
   if (!handle) { PB_RETURN(con, PB_FILE_OPEN_FAILED); }
-  file_size = platform_file_get_size(handle);
-  buffer = platform_malloc(file_size);
-  platform_file_read(handle, buffer, file_size);
+  file_buf.size = platform_file_get_size(handle);
+  file_buf = pb_slice_alloc(file_buf.size);
+  platform_file_read(handle, file_buf.data, file_buf.size);
 
   char** rows = NULL;
   size_t n_rows = 0;
-  for(size_t i=0; i < file_size; i++) {
-    if (buffer[i] == '\n') n_rows++;
+  for(size_t i=0; i < file_buf.size; i++) {
+    if (file_buf.data[i] == '\n') n_rows++;
   }
 
   rows = platform_malloc(sizeof(*rows) * n_rows);
 
-  rows[0] = buffer;
+  rows[0] = file_buf.data;
   for(size_t i=0; i < n_rows; i++) {
     char *newline_pos = strchr(rows[i], '\n');
     if (newline_pos) {
@@ -406,16 +427,18 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
   if(platform_send(con, "POST\r\n", PB_CSTR_SIZEOF("POST\r\n")) != PB_OK) return con->last_error;
   PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
 
-  content_size = file_size + n_rows; // add 1 for each row (\r\n in place of \0)
-  content = platform_malloc(content_size + 1);
-  char* cursor = content;
-  for(size_t i=0; i < n_rows && cursor <= (content + content_size); i++) {
-    int line_size = sprintf(cursor, "%s\r\n", rows[i]);
-    platform_send(con, cursor, line_size);
+  pb_slice_t content = pb_slice_alloc(file_buf.size + n_rows); // add 1 for each row (\r\n in place of \0)
+  pb_slice_t cursor  = content;
+
+  for(size_t i=0; i < n_rows && cursor.data <= (content.data + content.size); i++) {
+    cursor.size = sprintf(cursor.data, "%s\r\n", rows[i]);
+    platform_send(con, cursor.data, cursor.size);
     if(con->last_error != PB_OK) return con->last_error;
     PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
-    cursor += line_size;
+    cursor.data += cursor.size;
   }
+  pb_slice_free(&file_buf);
+  platform_free(rows);
 
   if(platform_send(con, "SUBMIT\r\n", PB_CSTR_SIZEOF("SUBMIT\r\n")) != PB_OK) return con->last_error;
 
@@ -431,35 +454,34 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
     .b64_suffix = strtok(NULL, " \r\n"),
   };
 
-  char b64_prefix[1024] = { 0 };
-  size_t b64_prefix_len = 0;
-  size_t b64_prefix_size = sizeof(b64_prefix);
+  pb_slice_t b64_prefix = { 0 };
 
   if (strcmp(challenge.algoritm, "sha256") == 0) {
     if(
       solve_challenge(
         &challenge,
-        content,
-        content_size,
-        b64_prefix,
-        b64_prefix_size,
-        &b64_prefix_len
+        &content,
+        &b64_prefix
       ) != PB_OK)
     PB_RETURN(con, PB_CHALLENGE_FAILED);
   } else {
-    free(content);
+    pb_slice_free(&content);
     PB_RETURN(con, PB_UNSUPPORTED);
   }
-  free(content);
+  pb_slice_free(&content);
 
-  size_t message_len = PB_CSTR_SIZEOF("ACCEPTED ") + b64_prefix_len + 2;
-  char* message = platform_malloc(message_len + 1);
+  pb_slice_t message = { 0 };
+  message.size = PB_CSTR_SIZEOF("ACCEPTED ") + b64_prefix.size + 2;
+  message.data = platform_malloc(message.size + 1);
 
+  sprintf(message.data, "ACCEPTED %.*s\r\n", (int)b64_prefix.size, b64_prefix.data);
 
-  sprintf(message, "ACCEPTED %.*s\r\n", (int)b64_prefix_len, b64_prefix);
+  pb_slice_free(&b64_prefix);
 
-  if(platform_send(con, message, message_len) != PB_OK) return con->last_error;
-  free(message);
+  if(platform_send(con, message.data, message.size) != PB_OK) return con->last_error;
+
+  pb_slice_free(&message);
+
   if (platform_recv(con, NULL) != PB_OK) { return con->last_error; }
   if (!starts_with(con->buf, "SENT ")) {
     PB_RETURN(con, PB_CHALLENGE_FAILED);
@@ -470,8 +492,6 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
 
   platform_file_close(handle);
 
-  free(rows);
-  free(buffer);
 
   PB_RETURN(con, PB_OK);
 }
