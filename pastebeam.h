@@ -24,9 +24,9 @@
  *     Once the connection is established, contact the server with one of the
  *     following functions:
  *
- *     - send one line and store it in the server with a unique ID
+ *     - send file contents and store them in the server with a unique ID
  *
- *       pb_err_t pb_post_line(pb_conn_t *con, const char* line, char** id);
+ *       pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id);
  *
  *     ...  -> TODO
  *
@@ -364,97 +364,18 @@ pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
 }
 
 /**
- * Send a single line to the server, will be saved as its own file
- * with a unique id.
- * Do not use this function in a loop to send multiple lines as a
- * single file, use pb_post_file instead
+ * Send the contents of a file to the server, will be saved with
+ * a unique id.
  * @param con  pb connection object (initialize with pb_connect)
  * @param line single line, null terminated.
  * @param id   pointer to the id assigned to the file on the server,
  *             should be freed by the caller.
  * @return pb error type, should be handled by the user. PB_OK on success
 */
-pb_err_t pb_post_line(pb_conn_t *con, const char* line, char** id) {
-  if(platform_send(con, "POST\r\n", PB_CSTR_SIZEOF("POST\r\n")) != PB_OK) return con->last_error;
-  PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
-
-  size_t len = strlen(line);
-  char *extended = platform_malloc(len + 2);
-  memcpy(extended, line, len);
-  extended[len]   = '\r';
-  extended[len+1] = '\n';
-  platform_send(con, extended, len+2);
-  if(con->last_error != PB_OK) return con->last_error;
-
-  // FIXME: leaking extended at each return;
-  PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
- 
-  if(platform_send(con, "SUBMIT\r\n", PB_CSTR_SIZEOF("SUBMIT\r\n")) != PB_OK) return con->last_error;
-
-  if (platform_recv(con, NULL) != PB_OK) { return con->last_error; }
-  if (!starts_with(con->buf, "CHALLENGE ")) {
-    PB_RETURN(con, PB_POST_FAILED);
-  }
-
-  strtok(con->buf, " \r\n");
-  pb_challenge_t challenge = {
-    .algoritm = strtok(NULL, " \r\n"),
-    .leading_zeros = atoi(strtok(NULL, " \r\n")),
-    .b64_suffix = strtok(NULL, " \r\n"),
-  };
-
-  char b64_prefix[1024] = { 0 };
-  size_t b64_prefix_len = 0;
-  size_t b64_prefix_size = sizeof(b64_prefix);
-
-  if (strcmp(challenge.algoritm, "sha256") == 0) {
-    if(
-      solve_challenge(
-        &challenge,
-        extended,
-        len + 2,
-        b64_prefix,
-        b64_prefix_size,
-        &b64_prefix_len
-      ) != PB_OK)
-    PB_RETURN(con, PB_CHALLENGE_FAILED);
-  } else {
-    free(extended);
-    PB_RETURN(con, PB_UNSUPPORTED);
-  }
-  free(extended);
-
-  size_t message_len = PB_CSTR_SIZEOF("ACCEPTED ") + b64_prefix_len + 2;
-  char* message = platform_malloc(message_len + 1);
-
-
-  sprintf(message, "ACCEPTED %.*s\r\n", (int)b64_prefix_len, b64_prefix);
-
-  if(platform_send(con, message, message_len) != PB_OK) return con->last_error;
-  free(message);
-  if (platform_recv(con, NULL) != PB_OK) { return con->last_error; }
-  if (starts_with(con->buf, "TOO SLOW\r\n")) {
-    PB_RETURN(con, PB_TIMEOUT);
-  }
-  if (!starts_with(con->buf, "SENT ")) {
-    PB_RETURN(con, PB_CHALLENGE_FAILED);
-  }
-
-  strtok(con->buf, " ");
-  *id = strdup(strtok(NULL, " "));
-
-  PB_RETURN(con, PB_OK);
-}
-
-
-// =============================================
-// NOT WORKING YET
-// =============================================
-
-// NOTE: *id should be freed by the user
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
-  (void)id;
   char* buffer = NULL;
+  char* content = NULL;
+  size_t content_size = 0;
   file_t handle = NULL;
   size_t file_size = 0;
 
@@ -465,44 +386,37 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
   platform_file_read(handle, buffer, file_size);
 
   char** rows = NULL;
-  size_t n_rows = 1;
+  size_t n_rows = 0;
   for(size_t i=0; i < file_size; i++) {
     if (buffer[i] == '\n') n_rows++;
   }
 
   rows = platform_malloc(sizeof(*rows) * n_rows);
-  printf("%zu lines:", n_rows);
 
   rows[0] = buffer;
-  for(size_t i=1; i < n_rows; i++) {
-    char *newline_pos = strchr(rows[i-1], '\n');
+  for(size_t i=0; i < n_rows; i++) {
+    char *newline_pos = strchr(rows[i], '\n');
     if (newline_pos) {
       *newline_pos = '\0';
-      rows[i] = newline_pos + 1;
+      if (i < n_rows -1 )
+        rows[i + 1] = newline_pos + 1;
     }
   }
-  // TODO: continue from here
 
-  platform_file_close(handle);
-
-  free(rows);
-  free(buffer);
-
-#if 0
   if(platform_send(con, "POST\r\n", PB_CSTR_SIZEOF("POST\r\n")) != PB_OK) return con->last_error;
   PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
 
-  size_t len = strlen(line);
-  char *extended = platform_malloc(len + 2);
-  memcpy(extended, line, len);
-  extended[len]   = '\r';
-  extended[len+1] = '\n';
-  platform_send(con, extended, len+2);
-  if(con->last_error != PB_OK) return con->last_error;
+  content_size = file_size + n_rows; // add 1 for each row (\r\n in place of \0)
+  content = platform_malloc(content_size + 1);
+  char* cursor = content;
+  for(size_t i=0; i < n_rows && cursor <= (content + content_size); i++) {
+    int line_size = sprintf(cursor, "%s\r\n", rows[i]);
+    platform_send(con, cursor, line_size);
+    if(con->last_error != PB_OK) return con->last_error;
+    PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
+    cursor += line_size;
+  }
 
-  // FIXME: leaking extended at each return;
-  PB_CHECK_RESP_PREFIX(con, "OK\r\n", PB_POST_FAILED);
- 
   if(platform_send(con, "SUBMIT\r\n", PB_CSTR_SIZEOF("SUBMIT\r\n")) != PB_OK) return con->last_error;
 
   if (platform_recv(con, NULL) != PB_OK) { return con->last_error; }
@@ -525,18 +439,18 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
     if(
       solve_challenge(
         &challenge,
-        extended,
-        len + 2,
+        content,
+        content_size,
         b64_prefix,
         b64_prefix_size,
         &b64_prefix_len
       ) != PB_OK)
     PB_RETURN(con, PB_CHALLENGE_FAILED);
   } else {
-    free(extended);
+    free(content);
     PB_RETURN(con, PB_UNSUPPORTED);
   }
-  free(extended);
+  free(content);
 
   size_t message_len = PB_CSTR_SIZEOF("ACCEPTED ") + b64_prefix_len + 2;
   char* message = platform_malloc(message_len + 1);
@@ -553,9 +467,13 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
 
   strtok(con->buf, " ");
   *id = strdup(strtok(NULL, " "));
-#endif
+
+  platform_file_close(handle);
+
+  free(rows);
+  free(buffer);
+
   PB_RETURN(con, PB_OK);
 }
-
 
 #endif // !PB_IMPLEMENTATION
