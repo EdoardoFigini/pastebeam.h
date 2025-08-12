@@ -28,6 +28,10 @@
  *
  *       pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id);
  *
+ *     - get file contents into a string
+ *
+ *       pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out);
+ *
  *     ...  -> TODO
  *
  *     All pb_post_* functions return the ID of the file saved on the server thorugh
@@ -127,6 +131,7 @@ typedef enum {
   PB_CONNECTION_REFUSED,
   PB_POST_FAILED,
   PB_CHALLENGE_FAILED,
+  PB_GET_FAILED,
   PB_TIMEOUT,
 } pb_err_t;
 
@@ -165,7 +170,8 @@ typedef struct {
 } pb_slice_t;
 
 pb_err_t pb_connect(const char* host, int port, pb_conn_t* con);
-pb_err_t pb_post_line(pb_conn_t *con, const char* line, char** id);
+pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id);
+pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out);
 
 const char* pb_err_to_string(pb_err_t err);
 
@@ -193,6 +199,7 @@ const char* pb_err_to_string(pb_err_t err) {
     case PB_CONNECTION_REFUSED:    return "PB_CONNECTION_REFUSED";
     case PB_POST_FAILED:           return "PB_POST_FAILED";
     case PB_CHALLENGE_FAILED:      return "PB_CHALLENGE_FAILED";
+    case PB_GET_FAILED:            return "PB_GET_FAILED";
     case PB_TIMEOUT:               return "PB_TIMEOUT";
     default:                       return "invalid error";
   }
@@ -390,10 +397,10 @@ pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
 /**
  * Send the contents of a file to the server, will be saved with
  * a unique id.
- * @param con  pb connection object (initialize with pb_connect)
- * @param line single line, null terminated.
- * @param id   pointer to the id assigned to the file on the server,
- *             should be freed by the caller.
+ * @param con      pb connection object (initialize with pb_connect)
+ * @param filename name of the file to post, null terminated.
+ * @param id       pointer to the id assigned to the file on the server,
+ *                 should be freed by the caller.
  * @return pb error type, should be handled by the user. PB_OK on success
 */
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
@@ -492,6 +499,31 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
 
   platform_file_close(handle);
 
+
+  PB_RETURN(con, PB_OK);
+}
+
+/**
+ * Get the contents of a file through a string
+ * @param con  pb connection object (initialize with pb_connect)
+ * @param id   id assigned to the file on the server
+ * @param out  pointer to the output string that will hold
+ *             the data, should be freed by the user.
+ * @return pb error type, should be handled by the user. PB_OK on success
+*/
+pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out) {
+  pb_slice_t msg = { 0 };
+  char buf[128] = { 0 };
+  msg.size = sprintf(buf, "GET %s\r\n", id);
+  msg.data = buf;
+
+  if(platform_send(con, msg.data, msg.size) != PB_OK) return con->last_error;
+  if (platform_recv(con, NULL) != PB_OK) { return con->last_error; }
+  if (starts_with(con->buf, "404")) {
+    PB_RETURN(con, PB_GET_FAILED);
+  }
+
+  *out = strdup(con->buf);
 
   PB_RETURN(con, PB_OK);
 }
