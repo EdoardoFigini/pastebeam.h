@@ -32,10 +32,11 @@
  *
  *       pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out);
  *
- *     ...  -> TODO
+ *     - save file contents to local file
  *
- *     All pb_post_* functions return the ID of the file saved on the server thorugh
- *     char** id, must be freed by the caller once it's done using it.
+ *       pb_err_t pb_get_file(pb_conn_t *con, const char* id);
+ *       pb_err_t pb_get_file_with_name(pb_conn_t *con, const char* id, const char* filename);
+ *
  *
  *     pb_err_t is returned by pb_* functions that interact with the server.
  *     To get the string representation of the error returned, a helper function is
@@ -44,10 +45,19 @@
  *       const char* pb_err_to_string(pb_err_t err);
  *
  *
+ *     Memory management notes:
+ *
+ *     All pb_post_* functions return the ID of the file saved on the server thorugh
+ *     char** id, must be freed by the caller once it's done using it.
+ *
+ *     pb_get_str returns the contents of the file saved on the server thorugh
+ *     char** out, must be freed by the caller once it's done using it.
+ *
+ *
  *     You can define:
  *
  *     - PB_CHALLENGE_MAX_ITER to set the maximum number of iterations in the challenge.
- *       (default is 5*10^7)
+ *       (default is 5 * 10_000_000)
  *
  *     - PB_BUFFER_SIZE to set the maximum buffer size the connection object will use
  *       for the recv buffer. (default is 1024)
@@ -125,6 +135,7 @@ typedef enum {
   PB_NOT_PASTEBEAM,
   PB_UNSUPPORTED,
   PB_FILE_OPEN_FAILED,
+  PB_FILE_WRITE_FAILED,
   PB_SOCK_CREATION_FAILED,
   PB_SEND_FAILED,
   PB_RECV_FAILED,
@@ -169,9 +180,14 @@ typedef struct {
   size_t size;
 } pb_slice_t;
 
+// ==============================
+//   FUNCTION PROTOTYPES
+// ==============================
 pb_err_t pb_connect(const char* host, int port, pb_conn_t* con);
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id);
 pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out);
+pb_err_t pb_get_file(pb_conn_t *con, const char* id);
+pb_err_t pb_get_file_with_name(pb_conn_t *con, const char* id, const char* filename);
 
 const char* pb_err_to_string(pb_err_t err);
 
@@ -193,6 +209,7 @@ const char* pb_err_to_string(pb_err_t err) {
     case PB_NOT_PASTEBEAM:         return "PB_NOT_PASTEBEAM";
     case PB_UNSUPPORTED:           return "PB_UNSUPPORTED";
     case PB_FILE_OPEN_FAILED:      return "PB_FILE_OPEN_FAILED";
+    case PB_FILE_WRITE_FAILED:     return "PB_FILE_WRITE_FAILED";
     case PB_SOCK_CREATION_FAILED:  return "PB_SOCK_CREATION_FAILED";
     case PB_SEND_FAILED:           return "PB_SEND_FAILED";
     case PB_RECV_FAILED:           return "PB_RECV_FAILED";
@@ -217,8 +234,12 @@ static void platform_free(void* data) {
   free(data);
 }
 
-static file_t platform_file_open(const char* filename) {
+static file_t platform_file_open_read(const char* filename) {
   return fopen(filename, "r");
+}
+
+static file_t platform_file_open_write(const char* filename) {
+  return fopen(filename, "w");
 }
 
 static size_t platform_file_get_size(file_t handle) {
@@ -231,6 +252,10 @@ static size_t platform_file_get_size(file_t handle) {
 
 static size_t platform_file_read(file_t handle, char* buf, size_t size) {
   return fread(buf, sizeof(char), size, handle);
+}
+
+static size_t platform_file_write(file_t handle, char* buf, size_t size) {
+  return fwrite(buf, sizeof(char), size, handle);
 }
 
 static void platform_file_close(file_t handle) {
@@ -340,7 +365,6 @@ static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slic
   pb_slice_t msg = { 0 };
 
   for (size_t iter = 0; iter < PB_CHALLENGE_MAX_ITER; iter++) {
-    // printf("%8zu / %d  ", iter, PB_CHALLENGE_MAX_ITER);
     if(gen_rand_prefix(b64_prefix) != 0) return PB_CHALLENGE_FAILED;
 
     msg = pb_slice_alloc(b64_prefix->size + 2 + content->size + b64_suffix_len + 2);
@@ -364,8 +388,6 @@ static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slic
     }
 
     if (zeros >= ch->leading_zeros) {
-      // printf("%.*s", (int)msg.size, msg.data); // remove pb_slice_free(&msg) to run this line
-      // printf("=========================\ndigest: %.*s\n", SHA256_DIGEST_LENGTH * 2, hexdigest);
       return PB_OK;
     }
     pb_slice_free(b64_prefix);
@@ -376,9 +398,9 @@ static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slic
 /**
  * Connect to a Pastebeam server.
  * @param host ip address of the server, null terminated
- * @param port server port
+ * @param port server port, if 0 will be set to `PB_DEFAULT_PORT`
  * @param con  pb connection object, should be allocated by the caller
- * @return pb error type, should be handled by the user. PB_OK on success
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
 */
 pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
   con->host = host;
@@ -401,13 +423,13 @@ pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
  * @param filename name of the file to post, null terminated.
  * @param id       pointer to the id assigned to the file on the server,
  *                 should be freed by the caller.
- * @return pb error type, should be handled by the user. PB_OK on success
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
 */
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
   pb_slice_t file_buf = { 0 };
   file_t handle = NULL;
 
-  handle = platform_file_open(filename);
+  handle = platform_file_open_read(filename);
   if (!handle) { PB_RETURN(con, PB_FILE_OPEN_FAILED); }
   file_buf.size = platform_file_get_size(handle);
   file_buf = pb_slice_alloc(file_buf.size);
@@ -509,7 +531,7 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
  * @param id   id assigned to the file on the server
  * @param out  pointer to the output string that will hold
  *             the data, should be freed by the user.
- * @return pb error type, should be handled by the user. PB_OK on success
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
 */
 pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out) {
   pb_slice_t msg = { 0 };
@@ -524,6 +546,50 @@ pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out) {
   }
 
   *out = strdup(con->buf);
+
+  PB_RETURN(con, PB_OK);
+}
+
+/**
+ * Get the contents of a file and save it in the current directory
+ * with the `id` as the filename.
+ * @param con pb connection object (initialize with pb_connect)
+ * @param id  id assigned to the file on the server
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
+pb_err_t pb_get_file(pb_conn_t *con, const char* id) {
+ PB_RETURN(con, pb_get_file_with_name(con, id, id));
+}
+
+/**
+ * Get the contents of a file and save it locally with a user defined
+ * path
+ * @param con       pb connection object (initialize with pb_connect)
+ * @param id        id assigned to the file on the server
+ * @param filename  path of the file that will contain the data,
+ *                  will be overwritten if already exists
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
+pb_err_t pb_get_file_with_name(pb_conn_t *con, const char* id, const char* filename) {
+  pb_slice_t msg = { 0 };
+
+  file_t handle = NULL;
+
+  char buf[128] = { 0 };
+  msg.size = sprintf(buf, "GET %s\r\n", id);
+  msg.data = buf;
+
+  if(platform_send(con, msg.data, msg.size) != PB_OK) return con->last_error;
+  if (platform_recv(con, NULL) != PB_OK) { return con->last_error; }
+  if (starts_with(con->buf, "404")) {
+    PB_RETURN(con, PB_GET_FAILED);
+  }
+
+  handle = platform_file_open_write(filename);
+  if (!handle) { PB_RETURN(con, PB_FILE_OPEN_FAILED); }
+  if (platform_file_write(handle, con->buf, strlen(con->buf)) == 0) {
+    PB_RETURN(con, PB_FILE_WRITE_FAILED);
+  }
 
   PB_RETURN(con, PB_OK);
 }
