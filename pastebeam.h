@@ -107,6 +107,7 @@
 #include <openssl/sha.h>
 #include <openssl/rand.h>
 #elif defined(_WIN32)
+
 #define PB_PLATFORM_WINDOWS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -117,12 +118,12 @@
 #include <wincrypt.h>
 
 #define SHA256_DIGEST_LENGTH 32
+
 #else
 #error Platform not supported
 #endif
 
 #include <string.h>
-#include <stdio.h>
 
 #define PB_DEFAULT_PORT 6969
 
