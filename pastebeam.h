@@ -60,7 +60,7 @@
  *       (default is 5 * 10_000_000)
  *
  *     - PB_BUFFER_SIZE to set the maximum buffer size the connection object will use
- *       for the recv buffer. (default is 1024)
+ *       for the recv buffer. (default is 4 * 1024 bytes)
  *
  * CREDITS:
  *
@@ -128,7 +128,7 @@
 #define PB_DEFAULT_PORT 6969
 
 #ifndef PB_BUFFER_SIZE
-#define PB_BUFFER_SIZE  1024
+#define PB_BUFFER_SIZE  4 * 1024
 #endif
 
 #ifndef PB_CHALLENGE_MAX_ITER
@@ -333,23 +333,17 @@ cleanup:
   return res;
 }
 
-static int gen_rand_prefix(pb_slice_t *prefix) {
-  unsigned int rnd;
-  unsigned char bytes[100] = { 0 };
+static int platform_rand_bytes(unsigned char* out, size_t size) {
+  return RAND_bytes(out, size) == -1;
+}
 
-  if(RAND_bytes((unsigned char*)&rnd, sizeof(rnd)) != 1) return -1;
-
-  int length = 3 + (rnd % 98);
-  if(RAND_bytes(bytes, length) != 1) return -1;
-
-  int encoded_len = PB_B64_LEN(length);
-  if (encoded_len == 0) return -1;
-
-  prefix->data = platform_malloc(encoded_len + 1);
-  prefix->size = EVP_EncodeBlock((unsigned char*)prefix->data, bytes, length);
-  if ((int)prefix->size != encoded_len) return -1;
-
-  return 0;
+static int platform_b64_enc(unsigned char* in, size_t size_in, unsigned char* out, size_t *size_out) {
+  if (!out) {
+    *size_out = PB_B64_LEN(size_in);
+  } else {
+    *size_out = EVP_EncodeBlock(out, in, size_in);
+  }
+  return *size_out == 0;
 }
 
 #elif defined(PB_PLATFORM_WINDOWS)
@@ -501,24 +495,12 @@ cleanup:
   return ret;
 }
 
-// TODO: make gen_rand_prefix not platform specific, but create something like
-// platform_rand_bytes and platform_b64_enc
-static int gen_rand_prefix(pb_slice_t *prefix) {
-  unsigned int rnd;
-  unsigned char bytes[100] = { 0 };
+static int platform_rand_bytes(unsigned char* out, size_t size) {
+  return BCryptGenRandom(NULL, (PUCHAR)out, size, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+}
 
-  if (BCryptGenRandom(NULL, (PUCHAR)&rnd, sizeof(rnd), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) return -1;
-
-  int length = 3 + (rnd % 98);
-  if (BCryptGenRandom(NULL, bytes, length, BCRYPT_USE_SYSTEM_PREFERRED_RNG)) return -1;
-
-  if (!CryptBinaryToStringA(bytes, length, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, (DWORD*)&prefix->size)) return -1;
-
-  prefix->data = platform_malloc(prefix->size + 1);
-
-  if (!CryptBinaryToStringA(bytes, length, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, prefix->data, (DWORD*)&prefix->size)) return -1;
-
-  return 0;
+static int platform_b64_enc(unsigned char* in, size_t size_in, unsigned char* out, size_t *size_out) {
+  return !CryptBinaryToStringA(in, (DWORD)size_in, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, out, (DWORD*)size_out);
 }
 
 #else
@@ -536,6 +518,23 @@ void pb_slice_free(pb_slice_t *s) {
   platform_free(s->data);
   s->data = NULL;
   s->size = 0;
+}
+
+static int gen_rand_prefix(pb_slice_t *prefix) {
+  unsigned int rnd;
+  unsigned char bytes[100] = { 0 };
+
+  if(platform_rand_bytes((unsigned char*)&rnd, sizeof(rnd))) return -1;
+
+  int length = 3 + (rnd % 98);
+  if(platform_rand_bytes(bytes, length)) return -1;
+
+  if(platform_b64_enc(bytes, length, NULL, &prefix->size)) return -1;
+
+  prefix->data = platform_malloc(prefix->size + 1);
+  if(platform_b64_enc(bytes, length, (unsigned char*)prefix->data, &prefix->size)) return -1;
+
+  return 0;
 }
 
 // NOTE: content is already terminated with \r\n
