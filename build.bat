@@ -1,3 +1,3 @@
 @echo off
 
-cl /Zi /Fe:main.exe main.c /link bcrypt.lib Ws2_32.lib crypt32.lib
+cl /Zi /W4 /Fe:main.exe main.c /D_CRT_SECURE_NO_WARNINGS /link bcrypt.lib Ws2_32.lib crypt32.lib

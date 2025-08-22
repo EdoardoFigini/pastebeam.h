@@ -9,6 +9,13 @@
  *
  *     in the file where you want to have the implementation
  *
+ *     When compiling make sure to link against OS libraries:
+ *     - Linux/Unix
+ *       -L/path/to/ssl/lib64 -lcrypto
+ *     - Windows:
+ *       /link bcrypt.lib Ws2_32.lib crypt32.lib
+ *
+ *
  * USAGE:
  *
  *     First of all connect to a pastebeam server:
@@ -337,11 +344,11 @@ static int platform_rand_bytes(unsigned char* out, size_t size) {
   return RAND_bytes(out, size) == -1;
 }
 
-static int platform_b64_enc(unsigned char* in, size_t size_in, unsigned char* out, size_t *size_out) {
+static int platform_b64_enc(unsigned char* in, size_t size_in, char* out, size_t *size_out) {
   if (!out) {
     *size_out = PB_B64_LEN(size_in);
   } else {
-    *size_out = EVP_EncodeBlock(out, in, size_in);
+    *size_out = EVP_EncodeBlock((unsigned char*)out, in, size_in);
   }
   return *size_out == 0;
 }
@@ -350,6 +357,8 @@ static int platform_b64_enc(unsigned char* in, size_t size_in, unsigned char* ou
 
 typedef HANDLE file_t;
 #define PB_INVALID_FILE_HANDLE INVALID_HANDLE_VALUE
+
+#define strdup(x) _strdup(x)
 
 static void* platform_malloc(size_t size) {
   return HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
@@ -374,12 +383,12 @@ static size_t platform_file_get_size(file_t handle) {
 
 static size_t platform_file_read(file_t handle, char* buf, size_t size) {
   DWORD read = 0;
-  return ReadFile(handle, buf, size, &read, NULL) ? read : 0;
+  return ReadFile(handle, buf, (DWORD)size, &read, NULL) ? read : 0;
 }
 
 static size_t platform_file_write(file_t handle, char* buf, size_t size) {
   DWORD written = 0;
-  return WriteFile(handle, buf, size, &written, NULL) ? written : 0;
+  return WriteFile(handle, buf, (DWORD)size, &written, NULL) ? written : 0;
 }
 
 static void platform_file_close(file_t handle) {
@@ -405,7 +414,7 @@ static pb_err_t platform_connect(pb_conn_t* con) {
 
   servaddr.sin_family = AF_INET;
   InetPton(AF_INET, con->host, &servaddr.sin_addr.s_addr);
-  servaddr.sin_port = htons(con->port);
+  servaddr.sin_port = htons((USHORT)con->port);
 
   if (connect(con->socket, (SOCKADDR*)&servaddr, sizeof(servaddr))) {
     WSACleanup();
@@ -427,7 +436,7 @@ static pb_err_t platform_recv(pb_conn_t* con, int* size) {
 }
 
 static pb_err_t platform_send(pb_conn_t* con, const char* data, size_t size) {
-  if(send(con->socket, data, size, 0) == SOCKET_ERROR) {
+  if(send(con->socket, data, (DWORD)size, 0) == SOCKET_ERROR) {
     WSACleanup();
     PB_RETURN(con, PB_SEND_FAILED);
   }
@@ -478,7 +487,7 @@ static int do_sha256(pb_slice_t *data, unsigned char* digest) {
   status = BCryptCreateHash(hAlg, &hHash, pbHashObject, cbHashObject, NULL, 0, 0);
   if (status != 0) { ret = -1; goto cleanup; }
 
-  status = BCryptHashData(hHash, (PUCHAR)data->data, data->size, 0);
+  status = BCryptHashData(hHash, (PUCHAR)data->data, (ULONG)data->size, 0);
   if (status != 0) { ret = -1; goto cleanup; }
 
   status = BCryptFinishHash(hHash, pbHash, cbHash, 0);
@@ -496,11 +505,11 @@ cleanup:
 }
 
 static int platform_rand_bytes(unsigned char* out, size_t size) {
-  return BCryptGenRandom(NULL, (PUCHAR)out, size, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+  return BCryptGenRandom(NULL, (PUCHAR)out, (ULONG)size, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 }
 
-static int platform_b64_enc(unsigned char* in, size_t size_in, unsigned char* out, size_t *size_out) {
-  return !CryptBinaryToStringA(in, (DWORD)size_in, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, out, (DWORD*)size_out);
+static int platform_b64_enc(unsigned char* in, size_t size_in, char* out, size_t *size_out) {
+  return !CryptBinaryToStringA(in, (DWORD)size_in, CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, (LPSTR)out, (DWORD*)size_out);
 }
 
 #else
@@ -532,14 +541,14 @@ static int gen_rand_prefix(pb_slice_t *prefix) {
   if(platform_b64_enc(bytes, length, NULL, &prefix->size)) return -1;
 
   prefix->data = platform_malloc(prefix->size + 1);
-  if(platform_b64_enc(bytes, length, (unsigned char*)prefix->data, &prefix->size)) return -1;
+  if(platform_b64_enc(bytes, length, prefix->data, &prefix->size)) return -1;
 
   return 0;
 }
 
 // NOTE: content is already terminated with \r\n
 static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slice_t *b64_prefix) {
-  int b64_suffix_len = strlen(ch->b64_suffix);
+  int b64_suffix_len = (int)strlen(ch->b64_suffix);
   unsigned char digest[SHA256_DIGEST_LENGTH] = { 0 };
   char hexdigest[SHA256_DIGEST_LENGTH * 2 + 1] = { 0 }; // account for '\0'
 
