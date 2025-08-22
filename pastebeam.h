@@ -10,8 +10,10 @@
  *     in the file where you want to have the implementation
  *
  *     When compiling make sure to link against OS libraries:
+ *
  *     - Linux/Unix
  *       -L/path/to/ssl/lib64 -lcrypto
+ *
  *     - Windows:
  *       /link bcrypt.lib Ws2_32.lib crypt32.lib
  *
@@ -194,15 +196,62 @@ typedef struct {
   size_t size;
 } pb_slice_t;
 
-// ==============================
-//   FUNCTION PROTOTYPES
-// ==============================
+
+/**
+ * Connect to a Pastebeam server.
+ * @param host ip address of the server, null terminated
+ * @param port server port, if 0 will be set to `PB_DEFAULT_PORT`
+ * @param con  pb connection object, should be allocated by the caller
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
 pb_err_t pb_connect(const char* host, int port, pb_conn_t* con);
+
+/**
+ * Send the contents of a file to the server, will be saved with
+ * a unique id.
+ * @param con      pb connection object (initialize with pb_connect)
+ * @param filename name of the file to post, null terminated.
+ * @param id       pointer to the id assigned to the file on the server,
+ *                 should be freed by the caller.
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id);
+
+/**
+ * Get the contents of a file through a string
+ * @param con  pb connection object (initialize with pb_connect)
+ * @param id   id assigned to the file on the server
+ * @param out  pointer to the output string that will hold
+ *             the data, should be freed by the user.
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
 pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out);
+
+/**
+ * Get the contents of a file and save it in the current directory
+ * with the `id` as the filename.
+ * @param con pb connection object (initialize with pb_connect)
+ * @param id  id assigned to the file on the server
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
 pb_err_t pb_get_file(pb_conn_t *con, const char* id);
+
+/**
+ * Get the contents of a file and save it locally with a user defined
+ * path
+ * @param con       pb connection object (initialize with pb_connect)
+ * @param id        id assigned to the file on the server
+ * @param filename  path of the file that will contain the data,
+ *                  will be overwritten if already exists
+ * @return pb error type, should be handled by the user. `PB_OK` on success.
+*/
 pb_err_t pb_get_file_with_name(pb_conn_t *con, const char* id, const char* filename);
 
+/**
+ * Get the string representation of an error code.
+ * @param err error code
+ * @return const zero terminated string
+*/
 const char* pb_err_to_string(pb_err_t err);
 
 #endif // !PASTEBEAM_H
@@ -585,13 +634,6 @@ static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slic
   return PB_CHALLENGE_FAILED;
 }
 
-/**
- * Connect to a Pastebeam server.
- * @param host ip address of the server, null terminated
- * @param port server port, if 0 will be set to `PB_DEFAULT_PORT`
- * @param con  pb connection object, should be allocated by the caller
- * @return pb error type, should be handled by the user. `PB_OK` on success.
-*/
 pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
   con->host = host;
   con->port = port ? port : PB_DEFAULT_PORT;
@@ -606,15 +648,6 @@ pb_err_t pb_connect(const char* host, int port, pb_conn_t* con) {
   PB_RETURN(con, PB_OK);
 }
 
-/**
- * Send the contents of a file to the server, will be saved with
- * a unique id.
- * @param con      pb connection object (initialize with pb_connect)
- * @param filename name of the file to post, null terminated.
- * @param id       pointer to the id assigned to the file on the server,
- *                 should be freed by the caller.
- * @return pb error type, should be handled by the user. `PB_OK` on success.
-*/
 pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
   pb_slice_t file_buf = { 0 };
   file_t handle = NULL;
@@ -715,14 +748,6 @@ pb_err_t pb_post_file(pb_conn_t *con, const char* filename, char** id) {
   PB_RETURN(con, PB_OK);
 }
 
-/**
- * Get the contents of a file through a string
- * @param con  pb connection object (initialize with pb_connect)
- * @param id   id assigned to the file on the server
- * @param out  pointer to the output string that will hold
- *             the data, should be freed by the user.
- * @return pb error type, should be handled by the user. `PB_OK` on success.
-*/
 pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out) {
   pb_slice_t msg = { 0 };
   char buf[128] = { 0 };
@@ -740,26 +765,10 @@ pb_err_t pb_get_str(pb_conn_t *con, const char* id, char** out) {
   PB_RETURN(con, PB_OK);
 }
 
-/**
- * Get the contents of a file and save it in the current directory
- * with the `id` as the filename.
- * @param con pb connection object (initialize with pb_connect)
- * @param id  id assigned to the file on the server
- * @return pb error type, should be handled by the user. `PB_OK` on success.
-*/
 pb_err_t pb_get_file(pb_conn_t *con, const char* id) {
   return pb_get_file_with_name(con, id, id);
 }
 
-/**
- * Get the contents of a file and save it locally with a user defined
- * path
- * @param con       pb connection object (initialize with pb_connect)
- * @param id        id assigned to the file on the server
- * @param filename  path of the file that will contain the data,
- *                  will be overwritten if already exists
- * @return pb error type, should be handled by the user. `PB_OK` on success.
-*/
 pb_err_t pb_get_file_with_name(pb_conn_t *con, const char* id, const char* filename) {
   pb_slice_t msg = { 0 };
 
