@@ -115,8 +115,8 @@
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
-#elif defined(_WIN32)
 
+#elif defined(_WIN32)
 #define PB_PLATFORM_WINDOWS
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -365,7 +365,7 @@ static pb_err_t platform_send(pb_conn_t* con, const char* data, size_t size) {
   PB_RETURN(con, PB_OK);
 }
 
-static int do_sha256(pb_slice_t *data, unsigned char* digest) {
+static int platform_sha256(pb_slice_t *data, unsigned char* digest) {
   EVP_MD_CTX *mdctx = NULL;
   const EVP_MD *md = NULL;
   unsigned int md_len = 0;
@@ -492,7 +492,7 @@ static pb_err_t platform_send(pb_conn_t* con, const char* data, size_t size) {
   PB_RETURN(con, PB_OK);
 }
 
-static int do_sha256(pb_slice_t *data, unsigned char* digest) {
+static int platform_sha256(pb_slice_t *data, unsigned char* digest) {
   NTSTATUS status;
   BCRYPT_ALG_HANDLE hAlg = NULL;
   BCRYPT_HASH_HANDLE hHash = NULL;
@@ -611,7 +611,7 @@ static pb_err_t solve_challenge(pb_challenge_t* ch, pb_slice_t *content, pb_slic
  
     sprintf(msg.data, "%.*s\r\n%.*s%s\r\n", (int)b64_prefix->size, b64_prefix->data, (int)content->size, content->data, ch->b64_suffix);
 
-    if(do_sha256(&msg, digest) != 0) return PB_CHALLENGE_FAILED;
+    if(platform_sha256(&msg, digest) != 0) return PB_CHALLENGE_FAILED;
     pb_slice_free(&msg);
     for (size_t i=0; i < SHA256_DIGEST_LENGTH; i++) {
       snprintf(&hexdigest[i * 2], 2 + 1, "%02X", digest[i]);
