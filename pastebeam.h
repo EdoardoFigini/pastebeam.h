@@ -11,7 +11,7 @@
  *
  *     When compiling make sure to link against OS libraries:
  *
- *     - Linux/Unix
+ *     - Linux/Unix:
  *       -L/path/to/ssl/lib64 -lcrypto
  *
  *     - Windows:
@@ -792,5 +792,11 @@ pb_err_t pb_get_file_with_name(pb_conn_t *con, const char* id, const char* filen
 
   PB_RETURN(con, PB_OK);
 }
+
+#undef PB_RETURN
+#undef PB_CHECK_RESP_PREFIX
+#undef PB_B64_LEN
+#undef PB_CSTR_SIZEOF
+#undef strdup
 
 #endif // !PB_IMPLEMENTATION
